@@ -5,7 +5,6 @@
 #include <cstdint>
 #include <string>
 
-
 namespace tick_store {
 
 class Engine {
@@ -18,6 +17,10 @@ public:
     void print_first_tick() const;
 
     std::size_t get_num_ticks() const { return num_ticks; }
+
+    double query_average_price(std::int32_t target_symbol,
+                               std::int64_t start_time,
+                               std::int64_t end_time) const;
 
 private:
 

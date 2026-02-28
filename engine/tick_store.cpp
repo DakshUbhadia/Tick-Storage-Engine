@@ -112,6 +112,41 @@ Engine::~Engine() {
     std::cout << "[tick_store::Engine] Resources released (munmap + close).\n";
 }
 
+double Engine::query_average_price(std::int32_t target_symbol,
+                                   std::int64_t start_time,
+                                   std::int64_t end_time) const
+{
+
+    double sum = 0.0;
+    std::size_t match_count = 0;
+
+    for (std::size_t i = 0; i < num_ticks; ++i) {
+
+        if (symbol_ids[i] == target_symbol
+            && timestamps[i] >= start_time
+            && timestamps[i] <= end_time)
+        {
+            sum += static_cast<double>(prices[i]);
+            ++match_count;
+        }
+    }
+    
+    if (match_count == 0) {
+        std::cout << "[query_average_price] No ticks matched the filter "
+                     "(symbol=" << target_symbol
+                  << ", time=[" << start_time << ", " << end_time << "]).\n";
+        return 0.0;
+    }
+
+    double average = sum / static_cast<double>(match_count);
+
+    std::cout << "[query_average_price] Scanned " << num_ticks
+              << " ticks — " << match_count << " matched.  "
+              << "Average price = " << average << "\n";
+
+    return average;
+}
+
 void Engine::print_first_tick() const {
     if (num_ticks == 0) {
         std::cout << "[tick_store::Engine] No ticks to display.\n";
