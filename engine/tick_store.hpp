@@ -22,6 +22,10 @@ public:
                                std::int64_t start_time,
                                std::int64_t end_time) const;
 
+    double crack_and_query(std::int32_t target_symbol,
+                           std::int64_t start_time,
+                           std::int64_t end_time);
+
 private:
 
     int file_descriptor;
@@ -29,11 +33,12 @@ private:
     void* mapped_memory;
 
     std::size_t file_size;
+    std::int64_t* timestamps;
+    std::int32_t* symbol_ids;
+    float*        prices;
+    std::int32_t* sizes;
 
-    const std::int64_t* timestamps;
-    const std::int32_t* symbol_ids;
-    const float*        prices;
-    const std::int32_t* sizes;
+    void swap_rows(std::size_t i, std::size_t j);
 
     std::size_t num_ticks;
 

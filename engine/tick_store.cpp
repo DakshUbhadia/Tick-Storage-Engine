@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -58,10 +59,11 @@ Engine::Engine(const std::string& filepath)
 
     num_ticks = file_size / BYTES_PER_TICK;
 
+
     mapped_memory = ::mmap(
         nullptr,
         file_size,
-        PROT_READ,
+        PROT_READ | PROT_WRITE,
         MAP_PRIVATE,
         file_descriptor,
         0
@@ -76,20 +78,21 @@ Engine::Engine(const std::string& filepath)
         );
     }
 
-    const char* base = static_cast<const char*>(mapped_memory);
 
-    timestamps = reinterpret_cast<const std::int64_t*>(base);
+    char* base = static_cast<char*>(mapped_memory);
 
-    symbol_ids = reinterpret_cast<const std::int32_t*>(
+    timestamps = reinterpret_cast<std::int64_t*>(base);
+
+    symbol_ids = reinterpret_cast<std::int32_t*>(
         base + (num_ticks * sizeof(std::int64_t))
     );
 
-    prices = reinterpret_cast<const float*>(
+    prices = reinterpret_cast<float*>(
         base + (num_ticks * sizeof(std::int64_t))
               + (num_ticks * sizeof(std::int32_t))
     );
 
-    sizes = reinterpret_cast<const std::int32_t*>(
+    sizes = reinterpret_cast<std::int32_t*>(
         base + (num_ticks * sizeof(std::int64_t))
               + (num_ticks * sizeof(std::int32_t))
               + (num_ticks * sizeof(float))
@@ -143,6 +146,78 @@ double Engine::query_average_price(std::int32_t target_symbol,
     std::cout << "[query_average_price] Scanned " << num_ticks
               << " ticks — " << match_count << " matched.  "
               << "Average price = " << average << "\n";
+
+    return average;
+}
+
+void Engine::swap_rows(std::size_t i, std::size_t j) {
+    std::swap(timestamps[i], timestamps[j]);
+    std::swap(symbol_ids[i], symbol_ids[j]);
+    std::swap(prices[i],     prices[j]);
+    std::swap(sizes[i],      sizes[j]);
+}
+
+double Engine::crack_and_query(std::int32_t target_symbol,
+                               std::int64_t start_time,
+                               std::int64_t end_time)
+{
+    if (num_ticks == 0) {
+        std::cout << "[crack_and_query] No ticks loaded.\n";
+        return 0.0;
+    }
+
+    std::size_t    left  = 0;
+    std::ptrdiff_t right = static_cast<std::ptrdiff_t>(num_ticks) - 1;
+
+    while (static_cast<std::ptrdiff_t>(left) < right) {
+
+        while (static_cast<std::ptrdiff_t>(left) < right
+               && symbol_ids[left] == target_symbol) {
+            ++left;
+        }
+
+        while (static_cast<std::ptrdiff_t>(left) < right
+               && symbol_ids[right] != target_symbol) {
+            --right;
+        }
+
+        if (static_cast<std::ptrdiff_t>(left) < right) {
+            swap_rows(left, static_cast<std::size_t>(right));
+            ++left;
+            --right;
+        }
+    }
+
+    std::size_t partition_end = left;
+    if (partition_end < num_ticks && symbol_ids[partition_end] == target_symbol) {
+        ++partition_end;
+    }
+
+    std::cout << "[crack_and_query] Partition complete.  "
+              << partition_end << " / " << num_ticks
+              << " ticks matched symbol " << target_symbol << ".\n";
+
+    double sum = 0.0;
+    std::size_t match_count = 0;
+
+    for (std::size_t i = 0; i < partition_end; ++i) {
+        if (timestamps[i] >= start_time && timestamps[i] <= end_time) {
+            sum += static_cast<double>(prices[i]);
+            ++match_count;
+        }
+    }
+
+    if (match_count == 0) {
+        std::cout << "[crack_and_query] No ticks in time window "
+                  << "[" << start_time << ", " << end_time << "].\n";
+        return 0.0;
+    }
+
+    double average = sum / static_cast<double>(match_count);
+
+    std::cout << "[crack_and_query] Scanned " << partition_end
+              << " ticks (cracked partition) — " << match_count
+              << " in time window.  Average price = " << average << "\n";
 
     return average;
 }
