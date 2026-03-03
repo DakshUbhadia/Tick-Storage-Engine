@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <immintrin.h>
 
 namespace tick_store {
 
@@ -26,6 +27,13 @@ public:
                            std::int64_t start_time,
                            std::int64_t end_time);
 
+
+    double simd_cracked_query(std::int64_t start_time,
+                              std::int64_t end_time,
+                              std::size_t partition_size) const;
+
+    std::size_t get_last_partition_size() const { return last_partition_size; }
+
 private:
 
     int file_descriptor;
@@ -41,6 +49,8 @@ private:
     void swap_rows(std::size_t i, std::size_t j);
 
     std::size_t num_ticks;
+
+    std::size_t last_partition_size = 0;
 
     Engine(const Engine&) = delete;
     Engine& operator=(const Engine&) = delete;
