@@ -80,7 +80,31 @@ int main() {
         std::cout << "  Average price : " << sub_avg << "\n"
                   << "  Subsequent latency : " << sub_ms << " ms  ("
                   << sub_us << " µs)\n"
-                  << "==========================================\n";        
+                  << "==========================================\n";
+
+        std::size_t partition_size = engine.get_last_partition_size();
+
+        std::cout << "\n--- Phase 4: SIMD Cracked Query ---\n"
+                  << "  Partition size : " << partition_size << "\n";
+
+        auto simd_start = std::chrono::high_resolution_clock::now();
+
+        double simd_avg = engine.simd_cracked_query(start_time,
+                                                    end_time,
+                                                    partition_size);
+
+        auto simd_end = std::chrono::high_resolution_clock::now();
+
+        auto simd_ms = std::chrono::duration_cast<
+            std::chrono::milliseconds>(simd_end - simd_start).count();
+
+        auto simd_us = std::chrono::duration_cast<
+            std::chrono::microseconds>(simd_end - simd_start).count();
+
+        std::cout << "  Average price  : " << simd_avg << "\n"
+                  << "  SIMD latency   : " << simd_ms << " ms  ("
+                  << simd_us << " µs)\n"
+                  << "==========================================\n";
     } catch (const std::runtime_error& e) {
 
         std::cerr << "\n[FATAL ERROR] " << e.what() << "\n";
