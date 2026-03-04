@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <immintrin.h>
 
 namespace tick_store {
@@ -32,6 +33,11 @@ public:
                               std::int64_t end_time,
                               std::size_t partition_size) const;
 
+    
+    double smart_simd_query(std::int32_t target_symbol,
+                            std::int64_t start_time,
+                            std::int64_t end_time);
+
     std::size_t get_last_partition_size() const { return last_partition_size; }
 
 private:
@@ -51,6 +57,8 @@ private:
     std::size_t num_ticks;
 
     std::size_t last_partition_size = 0;
+
+    std::unordered_map<std::int32_t, std::size_t> cracking_index;
 
     Engine(const Engine&) = delete;
     Engine& operator=(const Engine&) = delete;
