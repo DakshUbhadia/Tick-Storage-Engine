@@ -346,6 +346,155 @@ double Engine::simd_cracked_query(std::int64_t start_time,
     return average;
 }
 
+double Engine::smart_simd_query(std::int32_t target_symbol,
+                                std::int64_t start_time,
+                                std::int64_t end_time)
+{
+    if (num_ticks == 0) {
+        std::cout << "[smart_simd_query] No ticks loaded.\n";
+        return 0.0;
+    }
+
+
+    std::size_t partition_size = 0;
+
+    auto it = cracking_index.find(target_symbol);
+
+    if (it != cracking_index.end()) {
+
+        partition_size = it->second;
+        std::cout << "[Index] Cache hit for symbol " << target_symbol
+                  << ". Skipping partition. (partition_size = "
+                  << partition_size << ")\n";
+    } else {
+
+        std::size_t    left  = 0;
+        std::ptrdiff_t right = static_cast<std::ptrdiff_t>(num_ticks) - 1;
+
+        while (static_cast<std::ptrdiff_t>(left) < right) {
+            while (static_cast<std::ptrdiff_t>(left) < right
+                   && symbol_ids[left] == target_symbol) {
+                ++left;
+            }
+            while (static_cast<std::ptrdiff_t>(left) < right
+                   && symbol_ids[right] != target_symbol) {
+                --right;
+            }
+            if (static_cast<std::ptrdiff_t>(left) < right) {
+                swap_rows(left, static_cast<std::size_t>(right));
+                ++left;
+                --right;
+            }
+        }
+
+        std::size_t partition_end = left;
+        if (partition_end < num_ticks
+            && symbol_ids[partition_end] == target_symbol) {
+            ++partition_end;
+        }
+
+        partition_size = partition_end;
+        last_partition_size = partition_end;
+
+        
+        cracking_index[target_symbol] = partition_size;
+
+        std::cout << "[Index] Cache miss. Partitioned array and updated index. "
+                  << "(symbol = " << target_symbol
+                  << ", partition_size = " << partition_size << ")\n";
+    }
+
+    
+    if (partition_size == 0) {
+        std::cout << "[smart_simd_query] Partition is empty for symbol "
+                  << target_symbol << ".\n";
+        return 0.0;
+    }
+
+    __m256i v_start = _mm256_set1_epi64x(start_time);
+    __m256i v_end   = _mm256_set1_epi64x(end_time);
+    __m256  v_sum   = _mm256_setzero_ps();
+    std::size_t match_count = 0;
+
+    std::size_t i = 0;
+    std::size_t simd_end = (partition_size >= 8) ? (partition_size - 7) : 0;
+
+    for (; i < simd_end; i += 8) {
+        
+        __m256i ts_lo = _mm256_loadu_si256(
+            reinterpret_cast<const __m256i*>(&timestamps[i]));
+        __m256i ts_hi = _mm256_loadu_si256(
+            reinterpret_cast<const __m256i*>(&timestamps[i + 4]));
+
+        
+        __m256i too_early_lo   = _mm256_cmpgt_epi64(v_start, ts_lo);
+        __m256i too_late_lo    = _mm256_cmpgt_epi64(ts_lo, v_end);
+        __m256i out_of_range_lo = _mm256_or_si256(too_early_lo, too_late_lo);
+        __m256i all_ones        = _mm256_set1_epi64x(-1);
+        __m256i mask_lo         = _mm256_andnot_si256(out_of_range_lo, all_ones);
+
+        __m256i too_early_hi    = _mm256_cmpgt_epi64(v_start, ts_hi);
+        __m256i too_late_hi     = _mm256_cmpgt_epi64(ts_hi, v_end);
+        __m256i out_of_range_hi = _mm256_or_si256(too_early_hi, too_late_hi);
+        __m256i mask_hi         = _mm256_andnot_si256(out_of_range_hi, all_ones);
+
+        
+        __m128i lo_lo = _mm256_castsi256_si128(mask_lo);
+        __m128i lo_hi = _mm256_extracti128_si256(mask_lo, 1);
+        __m128i hi_lo = _mm256_castsi256_si128(mask_hi);
+        __m128i hi_hi = _mm256_extracti128_si256(mask_hi, 1);
+
+        __m128i lo_compressed = _mm_unpacklo_epi64(
+            _mm_shuffle_epi32(lo_lo, _MM_SHUFFLE(2, 0, 2, 0)),
+            _mm_shuffle_epi32(lo_hi, _MM_SHUFFLE(2, 0, 2, 0)));
+        __m128i hi_compressed = _mm_unpacklo_epi64(
+            _mm_shuffle_epi32(hi_lo, _MM_SHUFFLE(2, 0, 2, 0)),
+            _mm_shuffle_epi32(hi_hi, _MM_SHUFFLE(2, 0, 2, 0)));
+
+        __m256i mask_8x32 = _mm256_set_m128i(hi_compressed, lo_compressed);
+        __m256  float_mask = _mm256_castsi256_ps(mask_8x32);
+
+        
+        __m256 v_prices = _mm256_loadu_ps(&prices[i]);
+        __m256 masked   = _mm256_blendv_ps(_mm256_setzero_ps(),
+                                           v_prices, float_mask);
+        v_sum = _mm256_add_ps(v_sum, masked);
+
+        int movemask = _mm256_movemask_ps(float_mask);
+        match_count += __builtin_popcount(movemask);
+    }
+
+    
+    __m256 hadd1     = _mm256_hadd_ps(v_sum, v_sum);
+    __m256 hadd2     = _mm256_hadd_ps(hadd1, hadd1);
+    __m128 upper     = _mm256_extractf128_ps(hadd2, 1);
+    __m128 lower     = _mm256_castps256_ps128(hadd2);
+    __m128 total_vec = _mm_add_ss(lower, upper);
+    double sum       = static_cast<double>(_mm_cvtss_f32(total_vec));
+
+    
+    for (; i < partition_size; ++i) {
+        if (timestamps[i] >= start_time && timestamps[i] <= end_time) {
+            sum += static_cast<double>(prices[i]);
+            ++match_count;
+        }
+    }
+
+    if (match_count == 0) {
+        std::cout << "[smart_simd_query] No ticks in time window ["
+                  << start_time << ", " << end_time << "].\n";
+        return 0.0;
+    }
+
+    double average = sum / static_cast<double>(match_count);
+
+    std::cout << "[smart_simd_query] Scanned " << partition_size
+              << " ticks via AVX2 — " << match_count
+              << " in time window.  Average price = " << average << "\n";
+
+    return average;
+}
+
 void Engine::print_first_tick() const {
     if (num_ticks == 0) {
         std::cout << "[tick_store::Engine] No ticks to display.\n";
