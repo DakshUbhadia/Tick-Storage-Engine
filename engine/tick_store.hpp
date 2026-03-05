@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <immintrin.h>
 
 namespace tick_store {
@@ -54,11 +55,20 @@ private:
 
     void swap_rows(std::size_t i, std::size_t j);
 
+
+    void sort_partition_by_time(std::size_t left, std::size_t right);
+
+    std::pair<std::size_t, std::size_t> binary_search_time(
+        std::size_t   part_start,
+        std::size_t   part_size,
+        std::int64_t  start_time,
+        std::int64_t  end_time) const;
+
     std::size_t num_ticks;
 
     std::size_t last_partition_size = 0;
 
-    std::unordered_map<std::int32_t, std::size_t> cracking_index;
+    std::unordered_map<std::int32_t, std::pair<std::size_t, bool>> cracking_index;
 
     Engine(const Engine&) = delete;
     Engine& operator=(const Engine&) = delete;
