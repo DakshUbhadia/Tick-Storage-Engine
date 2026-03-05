@@ -346,6 +346,74 @@ double Engine::simd_cracked_query(std::int64_t start_time,
     return average;
 }
 
+void Engine::sort_partition_by_time(std::size_t left, std::size_t right)
+{
+
+    if (left >= right) return;
+
+    std::size_t  mid   = left + (right - left) / 2;
+    std::int64_t pivot = timestamps[mid];
+
+    std::size_t    i = left;
+    std::ptrdiff_t j = static_cast<std::ptrdiff_t>(right);
+
+    while (static_cast<std::ptrdiff_t>(i) <= j) {
+        while (timestamps[i] < pivot) ++i;
+        while (timestamps[static_cast<std::size_t>(j)] > pivot) --j;
+
+        if (static_cast<std::ptrdiff_t>(i) <= j) {
+            swap_rows(i, static_cast<std::size_t>(j));
+            ++i;
+            --j;
+        }
+    }
+
+    if (static_cast<std::ptrdiff_t>(left) < j)
+        sort_partition_by_time(left, static_cast<std::size_t>(j));
+    if (i < right)
+        sort_partition_by_time(i, right);
+}
+
+std::pair<std::size_t, std::size_t> Engine::binary_search_time(
+    std::size_t   part_start,
+    std::size_t   part_size,
+    std::int64_t  start_time,
+    std::int64_t  end_time) const
+{
+    std::size_t part_end = part_start + part_size;
+
+    std::size_t lo = part_start;
+    std::size_t hi = part_end;
+
+    while(lo < hi){
+        std::size_t mid = lo + (hi - lo)/2;
+        if(timestamps[mid] < start_time){
+            lo = mid + 1;
+        }
+        else{
+            hi = mid;
+        }
+    }
+    std::size_t lower_bound_idx = lo;
+
+    lo = lower_bound_idx;
+    hi = part_end;
+
+    while(lo < hi){
+        std::size_t mid = lo + (hi - lo) / 2;
+        if(timestamps[mid] <= end_time){
+            lo = mid + 1;
+        } 
+        else{
+            hi = mid;
+        }
+    }
+
+    std::size_t upper_bound_idx = lo;
+
+    return { lower_bound_idx, upper_bound_idx };
+}
+
 double Engine::smart_simd_query(std::int32_t target_symbol,
                                 std::int64_t start_time,
                                 std::int64_t end_time)
@@ -355,18 +423,20 @@ double Engine::smart_simd_query(std::int32_t target_symbol,
         return 0.0;
     }
 
-
     std::size_t partition_size = 0;
+    bool        is_sorted      = false;
 
     auto it = cracking_index.find(target_symbol);
 
-    if (it != cracking_index.end()) {
+    if(it != cracking_index.end()){
 
-        partition_size = it->second;
+        partition_size = it->second.first;
+        is_sorted      = it->second.second;
         std::cout << "[Index] Cache hit for symbol " << target_symbol
                   << ". Skipping partition. (partition_size = "
                   << partition_size << ")\n";
-    } else {
+    } 
+    else{
 
         std::size_t    left  = 0;
         std::ptrdiff_t right = static_cast<std::ptrdiff_t>(num_ticks) - 1;
@@ -396,37 +466,58 @@ double Engine::smart_simd_query(std::int32_t target_symbol,
         partition_size = partition_end;
         last_partition_size = partition_end;
 
-        
-        cracking_index[target_symbol] = partition_size;
+        cracking_index[target_symbol] = { partition_size, false };
 
         std::cout << "[Index] Cache miss. Partitioned array and updated index. "
                   << "(symbol = " << target_symbol
                   << ", partition_size = " << partition_size << ")\n";
     }
 
-    
     if (partition_size == 0) {
         std::cout << "[smart_simd_query] Partition is empty for symbol "
                   << target_symbol << ".\n";
         return 0.0;
     }
 
+    if (!is_sorted) {
+        sort_partition_by_time(0, partition_size - 1);
+        cracking_index[target_symbol].second = true;
+        std::cout << "[Sort] Chronologically sorted the cracked partition.\n";
+    }
+
+    auto [range_start, range_end] = binary_search_time(
+        0, partition_size, start_time, end_time);
+
+    std::size_t scan_size = (range_end > range_start)
+                          ? (range_end - range_start)
+                          : 0;
+
+    std::cout << "[Search] Binary search narrowed scope to "
+              << scan_size << " rows.\n";
+
+    if (scan_size == 0) {
+        std::cout << "[smart_simd_query] No ticks in time window ["
+                  << start_time << ", " << end_time << "].\n";
+        return 0.0;
+    }
+
+
     __m256i v_start = _mm256_set1_epi64x(start_time);
     __m256i v_end   = _mm256_set1_epi64x(end_time);
     __m256  v_sum   = _mm256_setzero_ps();
     std::size_t match_count = 0;
 
-    std::size_t i = 0;
-    std::size_t simd_end = (partition_size >= 8) ? (partition_size - 7) : 0;
+    std::size_t i        = range_start;
+    std::size_t simd_end = (range_end >= range_start + 8)
+                         ? (range_end - 7)
+                         : range_start;
 
     for (; i < simd_end; i += 8) {
-        
         __m256i ts_lo = _mm256_loadu_si256(
             reinterpret_cast<const __m256i*>(&timestamps[i]));
         __m256i ts_hi = _mm256_loadu_si256(
             reinterpret_cast<const __m256i*>(&timestamps[i + 4]));
 
-        
         __m256i too_early_lo   = _mm256_cmpgt_epi64(v_start, ts_lo);
         __m256i too_late_lo    = _mm256_cmpgt_epi64(ts_lo, v_end);
         __m256i out_of_range_lo = _mm256_or_si256(too_early_lo, too_late_lo);
@@ -438,7 +529,6 @@ double Engine::smart_simd_query(std::int32_t target_symbol,
         __m256i out_of_range_hi = _mm256_or_si256(too_early_hi, too_late_hi);
         __m256i mask_hi         = _mm256_andnot_si256(out_of_range_hi, all_ones);
 
-        
         __m128i lo_lo = _mm256_castsi256_si128(mask_lo);
         __m128i lo_hi = _mm256_extracti128_si256(mask_lo, 1);
         __m128i hi_lo = _mm256_castsi256_si128(mask_hi);
@@ -454,7 +544,6 @@ double Engine::smart_simd_query(std::int32_t target_symbol,
         __m256i mask_8x32 = _mm256_set_m128i(hi_compressed, lo_compressed);
         __m256  float_mask = _mm256_castsi256_ps(mask_8x32);
 
-        
         __m256 v_prices = _mm256_loadu_ps(&prices[i]);
         __m256 masked   = _mm256_blendv_ps(_mm256_setzero_ps(),
                                            v_prices, float_mask);
@@ -464,7 +553,6 @@ double Engine::smart_simd_query(std::int32_t target_symbol,
         match_count += __builtin_popcount(movemask);
     }
 
-    
     __m256 hadd1     = _mm256_hadd_ps(v_sum, v_sum);
     __m256 hadd2     = _mm256_hadd_ps(hadd1, hadd1);
     __m128 upper     = _mm256_extractf128_ps(hadd2, 1);
@@ -473,7 +561,7 @@ double Engine::smart_simd_query(std::int32_t target_symbol,
     double sum       = static_cast<double>(_mm_cvtss_f32(total_vec));
 
     
-    for (; i < partition_size; ++i) {
+    for (; i < range_end; ++i) {
         if (timestamps[i] >= start_time && timestamps[i] <= end_time) {
             sum += static_cast<double>(prices[i]);
             ++match_count;
@@ -488,8 +576,9 @@ double Engine::smart_simd_query(std::int32_t target_symbol,
 
     double average = sum / static_cast<double>(match_count);
 
-    std::cout << "[smart_simd_query] Scanned " << partition_size
-              << " ticks via AVX2 — " << match_count
+    std::cout << "[smart_simd_query] Scanned " << scan_size
+              << " ticks via AVX2 (of " << partition_size
+              << " in partition) — " << match_count
               << " in time window.  Average price = " << average << "\n";
 
     return average;
