@@ -1,10 +1,12 @@
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <functional>
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <numeric>
 #include <random>
 #include <sstream>
 #include <stdexcept>
@@ -15,6 +17,10 @@
 #include "engine/tick_store.hpp"
 
 namespace {
+
+constexpr std::int64_t kMinTimestamp = 1'700'000'000'000LL;
+constexpr std::int64_t kMaxTimestamp = 1'700'000'500'000LL;
+constexpr std::int64_t kMaxWindow = 10'000LL;
 
 struct QueryTuple {
     std::int32_t symbol;
@@ -55,87 +61,144 @@ private:
     std::ostringstream null_stream_;
 };
 
-constexpr std::size_t MASTER_QUERY_COUNT = 10'000;
-constexpr std::size_t STAGE1_QUERY_COUNT = 100;
-constexpr std::size_t STAGE2_QUERY_COUNT = 100;
-constexpr std::size_t STAGE34_QUERY_COUNT = 1'000;
-constexpr std::size_t STAGE5_QUERY_COUNT = 10'000;
+enum class Mode {
+    All,
+    Best,
+    Worst,
+    Real
+};
 
-std::vector<QueryTuple> make_master_queries() {
-    std::mt19937 rng(42);
-    std::uniform_int_distribution<std::int32_t> symbol_dist(1, 100);
-    std::uniform_int_distribution<std::int64_t> time_dist(
-        1'700'000'000'000LL,
-        1'700'000'500'000LL);
-    std::uniform_int_distribution<std::int64_t> window_dist(1000LL, 5000LL);
+Mode parse_mode(int argc, char** argv) {
+    if (argc <= 1) {
+        return Mode::All;
+    }
 
+    const std::string arg = argv[1];
+    if (arg == "--mode=all" || arg == "all") return Mode::All;
+    if (arg == "--mode=best" || arg == "best") return Mode::Best;
+    if (arg == "--mode=worst" || arg == "worst") return Mode::Worst;
+    if (arg == "--mode=real" || arg == "real") return Mode::Real;
+
+    throw std::runtime_error(
+        "Unknown mode. Use: best | worst | real | all (or --mode=best, --mode=worst, --mode=real, --mode=all)");
+}
+
+std::vector<std::int32_t> unique_symbols_in_order(const std::vector<QueryTuple>& queries) {
+    std::unordered_set<std::int32_t> seen;
+    seen.reserve(queries.size());
+
+    std::vector<std::int32_t> unique;
+    unique.reserve(queries.size());
+
+    for (const auto& q : queries) {
+        if (seen.insert(q.symbol).second) {
+            unique.push_back(q.symbol);
+        }
+    }
+    return unique;
+}
+
+std::vector<QueryTuple> make_best_case_workload() {
     std::vector<QueryTuple> queries;
-    queries.reserve(MASTER_QUERY_COUNT);
+    queries.reserve(1000);
 
-    for (std::size_t i = 0; i < MASTER_QUERY_COUNT; ++i) {
-        const std::int64_t t0 = time_dist(rng);
-        const std::int64_t t1 = t0 + window_dist(rng);
-        queries.push_back(QueryTuple{symbol_dist(rng), t0, t1});
+    constexpr std::array<std::int32_t, 3> hot_symbols{{42, 7, 17}};
+
+    for (std::size_t i = 0; i < 1000; ++i) {
+        const std::int32_t symbol = hot_symbols[i % 3];
+        const std::int64_t start = kMinTimestamp + (i % 100) * 1'000LL;
+        const std::int64_t end = std::min<std::int64_t>(start + 500LL, kMaxTimestamp);
+
+        queries.push_back(QueryTuple{symbol, start, end});
     }
 
     return queries;
 }
 
-std::vector<QueryTuple> take_first_n(const std::vector<QueryTuple>& source,
-                                     std::size_t n) {
-    if (source.size() < n) {
-        throw std::runtime_error("Query source smaller than requested subset.");
+std::vector<QueryTuple> make_worst_case_workload() {
+
+    std::vector<std::int32_t> symbols(1000);
+    std::iota(symbols.begin(), symbols.end(), 1);
+
+    std::mt19937 rng(42);
+    std::shuffle(symbols.begin(), symbols.end(), rng);
+
+    std::vector<QueryTuple> queries;
+    queries.reserve(symbols.size());
+
+    for (std::size_t i = 0; i < symbols.size(); ++i) {
+        const std::int64_t start = kMinTimestamp + static_cast<std::int64_t>(i) * 100LL;
+        const std::int64_t end = std::min<std::int64_t>(start + 5'000LL, kMaxTimestamp);
+
+        queries.push_back(QueryTuple{
+            symbols[i],
+            start,
+            end
+        });
     }
-    return std::vector<QueryTuple>(source.begin(), source.begin() + static_cast<std::ptrdiff_t>(n));
+
+    return queries;
 }
 
-std::vector<QueryTuple> take_first_n_unique_symbols(
-    const std::vector<QueryTuple>& source,
-    std::size_t n,
-    std::size_t expected_symbol_cardinality)
-{
-    std::vector<QueryTuple> subset;
-    subset.reserve(n);
-    std::unordered_set<std::int32_t> seen_symbols;
-    seen_symbols.reserve(expected_symbol_cardinality);
+std::vector<QueryTuple> make_real_life_workload() {
 
-    for (const auto& q : source) {
-        if (seen_symbols.insert(q.symbol).second) {
-            subset.push_back(q);
-            if (subset.size() == n) {
+    std::mt19937 rng(1337);
+    std::uniform_int_distribution<std::int64_t> time_dist(
+        kMinTimestamp,
+        kMaxTimestamp - kMaxWindow);
+    std::uniform_int_distribution<std::int64_t> window_dist(1'000LL, kMaxWindow);
+    std::uniform_int_distribution<int> hot_pick(1, 100);
+    std::uniform_int_distribution<std::size_t> hot_idx(0, 4);
+    std::uniform_int_distribution<std::size_t> cold_idx(0, 94);
+
+    constexpr std::array<std::int32_t, 5> hot_symbols{{42, 7, 17, 25, 66}};
+
+    std::vector<std::int32_t> cold_symbols;
+    cold_symbols.reserve(95);
+    for (std::int32_t s = 1; s <= 100; ++s) {
+        bool is_hot = false;
+        for (auto h : hot_symbols) {
+            if (s == h) {
+                is_hot = true;
                 break;
             }
         }
+        if (!is_hot) {
+            cold_symbols.push_back(s);
+        }
     }
 
-    if (subset.size() != n) {
-        throw std::runtime_error(
-            "Unable to build Stage 2 unique-symbol query set of requested size.");
+    std::vector<QueryTuple> queries;
+    queries.reserve(1000);
+
+    for (std::size_t i = 0; i < 1000; ++i) {
+        std::int32_t symbol = 0;
+
+        if (hot_pick(rng) <= 80) {
+            symbol = hot_symbols[hot_idx(rng)];
+        } else {
+            symbol = cold_symbols[cold_idx(rng)];
+        }
+
+        const std::int64_t start = time_dist(rng);
+        const std::int64_t end = std::min(start + window_dist(rng), kMaxTimestamp);
+
+        queries.push_back(QueryTuple{symbol, start, end});
     }
 
-    return subset;
+    return queries;
 }
 
-std::unordered_set<std::int32_t> unique_symbols_in(
-    const std::vector<QueryTuple>& queries)
-{
-    std::unordered_set<std::int32_t> symbols;
-    symbols.reserve(queries.size());
-    for (const auto& q : queries) {
-        symbols.insert(q.symbol);
-    }
-    return symbols;
-}
-
+template <typename WarmupFn, typename QueryFn>
 StageResult run_stage(
     const std::string& stage_name,
     const std::vector<QueryTuple>& queries,
-    double& global_dummy_accumulator,
-    const std::function<double(tick_store::Engine&, const QueryTuple&)>& query_fn,
-    const std::function<void(tick_store::Engine&, const std::vector<QueryTuple>&)>& warmup_fn)
+    WarmupFn&& warmup_fn,
+    QueryFn&& query_fn,
+    double& global_dummy_accumulator)
 {
     if (queries.empty()) {
-        throw std::runtime_error("Stage query list is empty.");
+        throw std::runtime_error("Query list is empty.");
     }
 
     tick_store::Engine engine("ticks.bin");
@@ -193,12 +256,89 @@ void print_table(const std::vector<StageResult>& results) {
     std::cout << "+----+-----------------------------------------------+------------+---------------+------------------+---------------------+----------------------+\n";
 }
 
-} // namespace
+void run_suite(const std::string& suite_name, const std::vector<QueryTuple>& workload) {
+    std::cout << "\n============================================================\n";
+    std::cout << "  " << suite_name << "\n";
+    std::cout << "============================================================\n";
 
-int main() {
+    double dummy_accumulator = 0.0;
+    std::vector<StageResult> results;
+    results.reserve(4);
+
+    auto no_warmup = [](tick_store::Engine&, const std::vector<QueryTuple>&) {};
+
+    auto warmup_crack_all_symbols = [](tick_store::Engine& e, const std::vector<QueryTuple>& queries) {
+        const auto symbols = unique_symbols_in_order(queries);
+        for (std::int32_t sym : symbols) {
+            (void)e.crack_and_query(sym, kMinTimestamp, kMaxTimestamp);
+        }
+    };
+
+    auto warmup_smart_all_symbols = [](tick_store::Engine& e, const std::vector<QueryTuple>& queries) {
+        const auto symbols = unique_symbols_in_order(queries);
+        for (std::int32_t sym : symbols) {
+            (void)e.smart_simd_query(sym, kMinTimestamp, kMaxTimestamp);
+        }
+    };
+
+    results.push_back(run_stage(
+        "Baseline O(N) Full Scan",
+        workload,
+        no_warmup,
+        [](tick_store::Engine& e, const QueryTuple& q) {
+            return e.query_average_price(q.symbol, q.start_time, q.end_time);
+        },
+        dummy_accumulator));
+
+    results.push_back(run_stage(
+        "Adaptive Cracking (Cold Miss)",
+        workload,
+        no_warmup,
+        [](tick_store::Engine& e, const QueryTuple& q) {
+            return e.crack_and_query(q.symbol, q.start_time, q.end_time);
+        },
+        dummy_accumulator));
+
+    results.push_back(run_stage(
+        "Adaptive Cracking (Hot Hit)",
+        workload,
+        warmup_crack_all_symbols,
+        [](tick_store::Engine& e, const QueryTuple& q) {
+            return e.crack_and_query(q.symbol, q.start_time, q.end_time);
+        },
+        dummy_accumulator));
+
+    results.push_back(run_stage(
+        "Ultimate Hot Path (Smart SIMD)",
+        workload,
+        warmup_smart_all_symbols,
+        [](tick_store::Engine& e, const QueryTuple& q) {
+            return e.smart_simd_query(q.symbol, q.start_time, q.end_time);
+        },
+        dummy_accumulator));
+
+    const double baseline_us = results.front().avg_latency_us;
+    for (auto& r : results) {
+        r.speedup_vs_baseline = (r.avg_latency_us > 0.0)
+            ? (baseline_us / r.avg_latency_us)
+            : std::numeric_limits<double>::infinity();
+    }
+
+    std::cout << "Workload size: " << workload.size() << "\n";
+    print_table(results);
+
+    std::cout << "\n[Anti-DCE] Global accumulated value: "
+              << std::setprecision(9) << dummy_accumulator << "\n";
+}
+
+}
+
+int main(int argc, char** argv) {
     try {
+        const Mode mode = parse_mode(argc, argv);
+
         std::cout << "============================================================\n";
-        std::cout << "  Tick Storage Engine — Five-Stage Ablation Benchmark\n";
+        std::cout << "  Tick Storage Engine — Benchmark (1000 queries per suite)\n";
         std::cout << "============================================================\n";
 
         auto map_start = std::chrono::high_resolution_clock::now();
@@ -211,105 +351,31 @@ int main() {
 
         std::cout << "  Probe map time  : " << std::fixed << std::setprecision(3)
                   << map_ms << " ms\n";
-        std::cout << "============================================================\n\n";
+        std::cout << "============================================================\n";
 
-        const auto master_queries = make_master_queries();
-        const auto stage1_queries = take_first_n(master_queries, STAGE1_QUERY_COUNT);
-        const auto stage2_queries = take_first_n_unique_symbols(master_queries,
-                                                                 STAGE2_QUERY_COUNT,
-                                                                 100);
-        const auto stage34_queries = take_first_n(master_queries, STAGE34_QUERY_COUNT);
-        const auto stage5_queries = take_first_n(master_queries, STAGE5_QUERY_COUNT);
+        const auto best_case_workload = make_best_case_workload();
+        const auto worst_case_workload = make_worst_case_workload();
+        const auto real_life_workload = make_real_life_workload();
 
-        double dummy_accumulator = 0.0;
-        std::vector<StageResult> results;
-        results.reserve(5);
+        switch (mode) {
+            case Mode::Best:
+                run_suite("Best-Case Cached Workload (Repeated Hot Symbols)", best_case_workload);
+                break;
 
-        results.push_back(run_stage(
-            "Stage 1: Baseline O(N) Full Scan",
-            stage1_queries,
-            dummy_accumulator,
-            [](tick_store::Engine& e, const QueryTuple& q) {
-                return e.query_average_price(q.symbol, q.start_time, q.end_time);
-            },
-            [](tick_store::Engine&, const std::vector<QueryTuple>&) {}));
+            case Mode::Worst:
+                run_suite("Worst-Case First-Touch Workload (Unique Symbols)", worst_case_workload);
+                break;
 
-        results.push_back(run_stage(
-            "Stage 2: Adaptive Cracking (Cold Miss)",
-            stage2_queries,
-            dummy_accumulator,
-            [](tick_store::Engine& e, const QueryTuple& q) {
-                return e.crack_and_query(q.symbol, q.start_time, q.end_time);
-            },
-            [](tick_store::Engine&, const std::vector<QueryTuple>&) {}));
+            case Mode::Real:
+                run_suite("Real-Life Skewed Workload (80/20 Distribution)", real_life_workload);
+                break;
 
-        results.push_back(run_stage(
-            "Stage 3: Adaptive Cracking (Hot Hit)",
-            stage34_queries,
-            dummy_accumulator,
-            [](tick_store::Engine& e, const QueryTuple& q) {
-                return e.crack_and_query(q.symbol, q.start_time, q.end_time);
-            },
-            [](tick_store::Engine& e, const std::vector<QueryTuple>& queries) {
-                auto symbols = unique_symbols_in(queries);
-                for (std::int32_t sym : symbols) {
-                    (void)e.crack_and_query(sym,
-                                            1'700'000'000'000LL,
-                                            1'700'000'500'000LL);
-                }
-            }));
-
-        results.push_back(run_stage(
-            "Stage 4: Sorted+Binary+SIMD (Cold Sort)",
-            stage34_queries,
-            dummy_accumulator,
-            [](tick_store::Engine& e, const QueryTuple& q) {
-                return e.smart_simd_query(q.symbol, q.start_time, q.end_time);
-            },
-            [](tick_store::Engine& e, const std::vector<QueryTuple>& queries) {
-                auto symbols = unique_symbols_in(queries);
-                for (std::int32_t sym : symbols) {
-                    // Prime partition layout without populating smart index metadata.
-                    (void)e.crack_and_query(sym,
-                                            1'700'000'000'000LL,
-                                            1'700'000'500'000LL);
-                }
-            }));
-
-        results.push_back(run_stage(
-            "Stage 5: Ultimate Hot Path (Smart SIMD)",
-            stage5_queries,
-            dummy_accumulator,
-            [](tick_store::Engine& e, const QueryTuple& q) {
-                return e.smart_simd_query(q.symbol, q.start_time, q.end_time);
-            },
-            [](tick_store::Engine& e, const std::vector<QueryTuple>& queries) {
-                auto symbols = unique_symbols_in(queries);
-                for (std::int32_t sym : symbols) {
-                    (void)e.smart_simd_query(sym,
-                                             1'700'000'000'000LL,
-                                             1'700'000'500'000LL);
-                }
-            }));
-
-        const double baseline_us = results.front().avg_latency_us;
-        for (auto& r : results) {
-            r.speedup_vs_baseline = (r.avg_latency_us > 0.0)
-                ? (baseline_us / r.avg_latency_us)
-                : std::numeric_limits<double>::infinity();
+            case Mode::All:
+                run_suite("Best-Case Cached Workload (Repeated Hot Symbols)", best_case_workload);
+                run_suite("Worst-Case First-Touch Workload (Unique Symbols)", worst_case_workload);
+                run_suite("Real-Life Skewed Workload (80/20 Distribution)", real_life_workload);
+                break;
         }
-
-        print_table(results);
-
-        std::cout << "\nRun profile:\n";
-        std::cout << "  Stage 1 queries: " << STAGE1_QUERY_COUNT << "\n";
-        std::cout << "  Stage 2 queries: " << STAGE2_QUERY_COUNT << " (unique symbols)\n";
-        std::cout << "  Stage 3 queries: " << STAGE34_QUERY_COUNT << "\n";
-        std::cout << "  Stage 4 queries: " << STAGE34_QUERY_COUNT << "\n";
-        std::cout << "  Stage 5 queries: " << STAGE5_QUERY_COUNT << "\n";
-
-        std::cout << "\n[Anti-DCE] Global accumulated value: "
-                  << std::setprecision(9) << dummy_accumulator << "\n";
 
         return 0;
     } catch (const std::exception& ex) {
