@@ -3,6 +3,29 @@
 #include <chrono>
 #include "engine/tick_store.hpp"
 
+static void run_query(tick_store::Engine& engine,
+                      const char*        label,
+                      std::int32_t       symbol,
+                      std::int64_t       start_time,
+                      std::int64_t       end_time)
+{
+    std::cout << "=== " << label << " ===\n"
+              << "  Target symbol : " << symbol   << "\n"
+              << "  Time window   : [" << start_time
+              << ", " << end_time << "]\n\n";
+
+    auto t0  = std::chrono::high_resolution_clock::now();
+    double avg = engine.smart_simd_query(symbol, start_time, end_time);
+    auto t1  = std::chrono::high_resolution_clock::now();
+
+    auto us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+
+    std::cout << "  Average price : " << avg << "\n"
+              << "  Latency       : " << ms << " ms  (" << us << " µs)\n"
+              << std::string(60, '=') << "\n\n";
+}
+
 int main() {
 
     try {
@@ -12,93 +35,41 @@ int main() {
 
         std::cout << "\nTotal ticks loaded: " << engine.get_num_ticks() << "\n\n";
 
-        constexpr std::int32_t target_symbol = 42;
+        run_query(engine,
+                  "Query 1 — Symbol 42 | Cold Start (Cache Miss + Sort)",
+                  42,
+                  1'700'000'000'000LL,
+                  1'700'000'005'000LL);
 
-        {
-            constexpr std::int64_t start_time = 1'700'000'000'000;
-            constexpr std::int64_t end_time   = 1'700'000'005'000;
+        run_query(engine,
+                  "Query 2 — Symbol 42 | Hot Cache (Skip Partition + Sort)",
+                  42,
+                  1'700'000'010'000LL,
+                  1'700'000'015'000LL);
 
-            std::cout << "=== Query 1 — Cold Start (Cache Miss + Sort) ===\n"
-                      << "  Target symbol : " << target_symbol << "\n"
-                      << "  Time window   : [" << start_time << ", "
-                      << end_time << "]\n\n";
+        run_query(engine,
+                  "Query 3 — Symbol 42 | Hot Cache (Narrow Window — O(log N) Payoff)",
+                  42,
+                  1'700'000'002'000LL,
+                  1'700'000'003'000LL);
 
-            auto t0 = std::chrono::high_resolution_clock::now();
+        run_query(engine,
+                  "Query 4 — Symbol 7  | Cold Start (NEW symbol, cracks tail only)",
+                  7,
+                  1'700'000'000'000LL,
+                  1'700'000'005'000LL);
 
-            double avg = engine.smart_simd_query(target_symbol,
-                                                 start_time,
-                                                 end_time);
+        run_query(engine,
+                  "Query 5 — Symbol 7  | Hot Cache",
+                  7,
+                  1'700'000'010'000LL,
+                  1'700'000'015'000LL);
 
-            auto t1 = std::chrono::high_resolution_clock::now();
-
-            auto ms = std::chrono::duration_cast<
-                std::chrono::milliseconds>(t1 - t0).count();
-            auto us = std::chrono::duration_cast<
-                std::chrono::microseconds>(t1 - t0).count();
-
-            std::cout << "  Average price : " << avg << "\n"
-                      << "  Latency       : " << ms << " ms  ("
-                      << us << " µs)\n"
-                      << "==========================================\n\n";
-        }
-
-        {
-            constexpr std::int64_t start_time = 1'700'000'010'000;
-            constexpr std::int64_t end_time   = 1'700'000'015'000;
-
-            std::cout << "=== Query 2 — Hot Cache (Skip Partition + Skip Sort) ===\n"
-                      << "  Target symbol : " << target_symbol
-                      << " (same symbol)\n"
-                      << "  Time window   : [" << start_time << ", "
-                      << end_time << "]\n\n";
-
-            auto t0 = std::chrono::high_resolution_clock::now();
-
-            double avg = engine.smart_simd_query(target_symbol,
-                                                 start_time,
-                                                 end_time);
-
-            auto t1 = std::chrono::high_resolution_clock::now();
-
-            auto ms = std::chrono::duration_cast<
-                std::chrono::milliseconds>(t1 - t0).count();
-            auto us = std::chrono::duration_cast<
-                std::chrono::microseconds>(t1 - t0).count();
-
-            std::cout << "  Average price : " << avg << "\n"
-                      << "  Latency       : " << ms << " ms  ("
-                      << us << " µs)\n"
-                      << "==========================================\n\n";
-        }
-
-        {
-            constexpr std::int64_t start_time = 1'700'000'002'000;
-            constexpr std::int64_t end_time   = 1'700'000'003'000;
-
-            std::cout << "=== Query 3 — O(log N) Payoff (Narrow Window) ===\n"
-                      << "  Target symbol : " << target_symbol
-                      << " (same symbol, tiny window)\n"
-                      << "  Time window   : [" << start_time << ", "
-                      << end_time << "]\n\n";
-
-            auto t0 = std::chrono::high_resolution_clock::now();
-
-            double avg = engine.smart_simd_query(target_symbol,
-                                                 start_time,
-                                                 end_time);
-
-            auto t1 = std::chrono::high_resolution_clock::now();
-
-            auto ms = std::chrono::duration_cast<
-                std::chrono::milliseconds>(t1 - t0).count();
-            auto us = std::chrono::duration_cast<
-                std::chrono::microseconds>(t1 - t0).count();
-
-            std::cout << "  Average price : " << avg << "\n"
-                      << "  Latency       : " << ms << " ms  ("
-                      << us << " µs)\n"
-                      << "==========================================\n";
-        }
+        run_query(engine,
+                  "Query 6 — Symbol 42 | Hot Cache (after symbol 7 — partition must persist!)",
+                  42,
+                  1'700'000'020'000LL,
+                  1'700'000'025'000LL);
 
     } catch (const std::runtime_error& e) {
 

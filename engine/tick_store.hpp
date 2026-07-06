@@ -10,6 +10,12 @@
 
 namespace tick_store {
 
+struct PartitionInfo {
+    std::size_t start;
+    std::size_t length;
+    bool        is_sorted;
+};
+
 class Engine {
 public:
 
@@ -29,12 +35,11 @@ public:
                            std::int64_t start_time,
                            std::int64_t end_time);
 
+    double simd_cracked_query(std::size_t  part_start,
+                              std::size_t  part_size,
+                              std::int64_t start_time,
+                              std::int64_t end_time) const;
 
-    double simd_cracked_query(std::int64_t start_time,
-                              std::int64_t end_time,
-                              std::size_t partition_size) const;
-
-    
     double smart_simd_query(std::int32_t target_symbol,
                             std::int64_t start_time,
                             std::int64_t end_time);
@@ -43,18 +48,16 @@ public:
 
 private:
 
-    int file_descriptor;
-
+    int   file_descriptor;
     void* mapped_memory;
 
-    std::size_t file_size;
+    std::size_t   file_size;
     std::int64_t* timestamps;
     std::int32_t* symbol_ids;
     float*        prices;
     std::int32_t* sizes;
 
     void swap_rows(std::size_t i, std::size_t j);
-
 
     void sort_partition_by_time(std::size_t left, std::size_t right);
 
@@ -68,7 +71,8 @@ private:
 
     std::size_t last_partition_size = 0;
 
-    std::unordered_map<std::int32_t, std::pair<std::size_t, bool>> cracking_index;
+    std::unordered_map<std::int32_t, PartitionInfo> cracking_index;
+    std::size_t next_free = 0;
 
     Engine(const Engine&) = delete;
     Engine& operator=(const Engine&) = delete;
