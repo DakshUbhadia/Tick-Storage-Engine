@@ -6,52 +6,72 @@ The project stores 50 million synthetic ticks in a columnar binary file, maps th
 
 ## Headline Result
 
-The benchmark demonstrates a cold-to-hot latency shift:
+The benchmark demonstrates a massive cold-to-hot latency shift. In our **Best-Case** workload (repeated hot symbols), we see the following results:
 
-- Baseline full scan: `85,906.446 us/query`
-- Ultimate warmed smart path: `1.206 us/query`
-- Speedup vs measured baseline: `71,203.949x`
+- Baseline full scan: `41,629.946 us/query`
+- Ultimate warmed smart path: `1.055 us/query`
+- Speedup vs measured baseline: `39,475.081x`
+- Peak Throughput: `~948,237 QPS`
 - Dataset: `50,000,000` ticks, `1,000,000,000` bytes
 
-Earlier exploratory runs also showed the same architectural effect at a more extreme cold-vs-hot boundary:
+Even in a **Real-Life Skewed** workload (80% hot queries, 20% cold queries), the warmed path achieves an incredible **27,145x speedup** (1.582 us/query vs 42,948 us/query).
 
+Furthermore, in a **Worst-Case** scenario (randomly jumping across 100 different partitions to defeat cache locality), the engine's binary-search and SIMD pipeline still manages a staggering **14,512x speedup** (2.741 us/query) and a peak throughput of **~365,000 QPS**.
+
+That number is best understood as a regime change, not as one identical query becoming thousands of times faster. The first query for a symbol pays an adaptive partitioning and sorting cost. Repeated queries reuse the prepared structure, binary search the time boundary, and SIMD scan only tiny timestamp windows.
+
+## Benchmark
+
+The benchmark runs three distinct workload scenarios—**Best-Case Cached**, **Worst-Case Randomized Scatter**, and **Real-Life Skewed**—each processing 1000 queries against the 50-million-tick dataset.
+
+### 1. Best-Case Cached Workload (Repeated Hot Symbols)
+This tests the engine at its peak steady-state performance. Queries repeatedly hit the exact same 3 hot symbols with tight time windows, resulting in maximum temporal locality and cache utilization.
 ```text
-Cold structural path:     about 2.63 s
-Hot steady-state query:   about 0.486 us
-Cold-to-hot speedup:      about 5.4 million x
-```
-
-That number is best understood as a regime change, not as one identical query becoming millions of times faster. The first query for a symbol can pay adaptive partitioning and sorting cost. Repeated queries reuse the prepared structure and scan only tiny timestamp windows.
-
-## Latest Ablation Benchmark
-
-```text
-============================================================
-  Tick Storage Engine - Five-Stage Ablation Benchmark
-============================================================
-[tick_store::Engine] Successfully mapped 'ticks.bin' (1000000000 bytes, 50000000 ticks).
-  Ticks loaded    : 50000000
-  Probe map time  : 0.134 ms
-============================================================
-
 +----+-----------------------------------------------+------------+---------------+------------------+---------------------+----------------------+
 | #  | Stage Name                                    | Queries    | Avg Latency   | Total Time       | Throughput          | Speedup vs Baseline  |
 |    |                                               |            | (us/query)    | (ms)             | (QPS)               | (x)                  |
 +----+-----------------------------------------------+------------+---------------+------------------+---------------------+----------------------+
-|  1 | Stage 1: Baseline O(N) Full Scan              |        100 |     85906.446 |         8590.645 |              11.641 |                1.000 |
-|  2 | Stage 2: Adaptive Cracking (Cold Miss)        |        100 |    131466.688 |        13146.669 |               7.606 |                0.653 |
-|  3 | Stage 3: Adaptive Cracking (Hot Hit)          |       1000 |   2882177.408 |      2882177.408 |               0.347 |                0.030 |
-|  4 | Stage 4: Sorted+Binary+SIMD (Cold Sort)       |       1000 |     10331.514 |        10331.514 |              96.791 |                8.315 |
-|  5 | Stage 5: Ultimate Hot Path (Smart SIMD)       |      10000 |         1.206 |           12.065 |          828854.549 |            71203.949 |
+|  1 | Baseline O(N) Full Scan                       |       1000 |     41629.946 |        41629.946 |              24.021 |                1.000 |
+|  2 | Adaptive Cracking (Cold Miss)                 |       1000 |      1377.873 |         1377.873 |             725.756 |               30.213 |
+|  3 | Adaptive Cracking (Hot Hit)                   |       1000 |       291.774 |          291.774 |            3427.307 |              142.679 |
+|  4 | Ultimate Hot Path (Smart SIMD)                |       1000 |         1.055 |            1.055 |          948237.606 |            39475.081 |
++----+-----------------------------------------------+------------+---------------+------------------+---------------------+----------------------+
+```
+
+### 2. Worst-Case Workload (Randomized Scatter)
+This scenario randomly jumps across all 100 available symbols with wide time windows. It forces the engine to pay the initial cracking cost for every symbol in the dataset, and then heavily defeats CPU caching by ensuring no two consecutive queries hit the same memory region.
+```text
++----+-----------------------------------------------+------------+---------------+------------------+---------------------+----------------------+
+| #  | Stage Name                                    | Queries    | Avg Latency   | Total Time       | Throughput          | Speedup vs Baseline  |
+|    |                                               |            | (us/query)    | (ms)             | (QPS)               | (x)                  |
++----+-----------------------------------------------+------------+---------------+------------------+---------------------+----------------------+
+|  1 | Baseline O(N) Full Scan                       |       1000 |     39773.257 |        39773.257 |              25.143 |                1.000 |
+|  2 | Adaptive Cracking (Cold Miss)                 |       1000 |      7590.720 |         7590.720 |             131.740 |                5.240 |
+|  3 | Adaptive Cracking (Hot Hit)                   |       1000 |       311.279 |          311.279 |            3212.548 |              127.773 |
+|  4 | Ultimate Hot Path (Smart SIMD)                |       1000 |         2.741 |            2.741 |          364881.072 |            14512.509 |
++----+-----------------------------------------------+------------+---------------+------------------+---------------------+----------------------+
+```
+
+### 3. Real-Life Skewed Workload (80/20 Distribution)
+This scenario simulates an actual trading workload where 80% of queries hit a few hot symbols, and 20% hit cold symbols.
+```text
++----+-----------------------------------------------+------------+---------------+------------------+---------------------+----------------------+
+| #  | Stage Name                                    | Queries    | Avg Latency   | Total Time       | Throughput          | Speedup vs Baseline  |
+|    |                                               |            | (us/query)    | (ms)             | (QPS)               | (x)                  |
++----+-----------------------------------------------+------------+---------------+------------------+---------------------+----------------------+
+|  1 | Baseline O(N) Full Scan                       |       1000 |     42948.176 |        42948.176 |              23.284 |                1.000 |
+|  2 | Adaptive Cracking (Cold Miss)                 |       1000 |      4587.372 |         4587.372 |             217.990 |                9.362 |
+|  3 | Adaptive Cracking (Hot Hit)                   |       1000 |       306.282 |          306.282 |            3264.967 |              140.224 |
+|  4 | Ultimate Hot Path (Smart SIMD)                |       1000 |         1.582 |            1.582 |          632058.913 |            27145.778 |
 +----+-----------------------------------------------+------------+---------------+------------------+---------------------+----------------------+
 ```
 
 Benchmark interpretation:
 
-- Stage 1 is the direct `O(N)` scan over all 50 million ticks.
-- Stages 2 and 3 expose the cost profile of adaptive cracking. First-touch structural work can be expensive.
-- Stage 4 shows the impact of sorting by timestamp, binary-search pruning, and SIMD.
-- Stage 5 is the real target workload: warmed partitions, sorted symbol ranges, hot pages, narrowed windows, and SIMD aggregation.
+- **Stage 1** is the direct `O(N)` scan over all 50 million ticks.
+- **Stage 2** exposes the cost profile of adaptive cracking. First-touch structural work can be expensive but always beats the baseline since the uncracked tail shrinks with every miss.
+- **Stage 3** demonstrates the engine reusing partitioned symbol ranges (the cache hit). 
+- **Stage 4** represents the ultimate warmed state: narrowed windows via binary-search over sorted ranges, and AVX2 SIMD aggregation. It effortlessly reaches between **360,000 and 940,000 queries per second** depending on memory locality and cache conditions.
 
 ## What The Engine Optimizes
 
@@ -122,7 +142,7 @@ For uniformly distributed symbols in `1..100`, one symbol partition is roughly `
 The `cracking_index` maps:
 
 ```text
-symbol_id -> (partition_size, sorted_flag)
+symbol_id -> PartitionInfo{start, length, is_sorted}
 ```
 
 On a cache hit, the engine skips partitioning and reuses the symbol-local range. This is the boundary between cold structural work and hot query execution.
@@ -199,7 +219,7 @@ column pointers
 
 ```text
 .
-|-- benchmark.cpp          # Five-stage ablation benchmark
+|-- benchmark.cpp          # Multi-scenario ablation benchmark
 |-- generate_data.cpp      # Synthetic 50M-tick data generator
 |-- main.cpp               # Small cold/hot query demo
 `-- engine
@@ -239,10 +259,10 @@ Run the query demo:
 ./tick_engine
 ```
 
-Run the ablation benchmark:
+Run the ablation benchmark (runs all three modes):
 
 ```bash
-./benchmark_engine
+./benchmark_engine all
 ```
 
 The generated `ticks.bin` file is intentionally ignored by Git because it is about 1 GB.
@@ -292,3 +312,4 @@ This is a compact demonstration of systems techniques used in analytical storage
 - benchmark design that separates cold preparation from steady-state execution
 
 The result is a small codebase that makes the cost model visible: every major latency drop comes from removing a specific class of work.
+```
