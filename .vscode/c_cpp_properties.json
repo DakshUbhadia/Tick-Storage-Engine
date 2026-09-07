@@ -1,0 +1,20 @@
+{
+    "configurations": [
+        {
+            "name": "WSL-GCC",
+            "includePath": [
+                "${workspaceFolder}/**",
+                "/usr/include",
+                "/usr/include/x86_64-linux-gnu",
+                "/usr/lib/gcc/x86_64-linux-gnu/11/include"
+            ],
+            "defines": ["__rdtsc=__rdtsc_dummy"],
+            "compilerPath": "/usr/bin/g++",
+            "cStandard": "c17",
+            "cppStandard": "c++20",
+            "intelliSenseMode": "linux-gcc-x64",
+            "compilerArgs": ["-mavx2", "-march=native", "-fno-builtin"]
+        }
+    ],
+    "version": 4
+}

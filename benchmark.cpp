@@ -8,7 +8,7 @@
 #include <limits>
 #include <numeric>
 #include <random>
-#include <sstream>
+#include <fstream>
 #include <stdexcept>
 #include <string>
 #include <unordered_set>
@@ -35,6 +35,8 @@ struct StageResult {
     double avg_latency_us;
     double throughput_qps;
     double speedup_vs_baseline;
+    double p95_latency_us;
+    double p99_latency_us;
 };
 
 class ScopedCoutSilencer {
@@ -42,7 +44,8 @@ public:
     explicit ScopedCoutSilencer(bool enabled)
         : enabled_(enabled), old_buf_(nullptr) {
         if (enabled_) {
-            old_buf_ = std::cout.rdbuf(null_stream_.rdbuf());
+            null_file_.open("/dev/null");
+            old_buf_ = std::cout.rdbuf(null_file_.rdbuf());
         }
     }
 
@@ -58,14 +61,15 @@ public:
 private:
     bool enabled_;
     std::streambuf* old_buf_;
-    std::ostringstream null_stream_;
+    std::ofstream null_file_;  // writes to /dev/null - zero heap allocation
 };
 
 enum class Mode {
     All,
     Best,
     Worst,
-    Real
+    Real,
+    Smart
 };
 
 Mode parse_mode(int argc, char** argv) {
@@ -78,9 +82,10 @@ Mode parse_mode(int argc, char** argv) {
     if (arg == "--mode=best" || arg == "best") return Mode::Best;
     if (arg == "--mode=worst" || arg == "worst") return Mode::Worst;
     if (arg == "--mode=real" || arg == "real") return Mode::Real;
+    if (arg == "--mode=smart" || arg == "smart") return Mode::Smart;
 
     throw std::runtime_error(
-        "Unknown mode. Use: best | worst | real | all (or --mode=best, --mode=worst, --mode=real, --mode=all)");
+        "Unknown mode. Use: best | worst | real | all | smart (or --mode=...)");
 }
 
 std::vector<std::int32_t> unique_symbols_in_order(const std::vector<QueryTuple>& queries) {
@@ -117,8 +122,15 @@ std::vector<QueryTuple> make_best_case_workload() {
 
 std::vector<QueryTuple> make_worst_case_workload() {
 
-    std::vector<std::int32_t> symbols(1000);
-    std::iota(symbols.begin(), symbols.end(), 1);
+    // 1000 queries distributed uniformly across all 100 existing symbols
+    // to maximize cache eviction without querying non-existent data.
+    std::vector<std::int32_t> symbols;
+    symbols.reserve(1000);
+    for (int i = 0; i < 10; ++i) {
+        for (int s = 1; s <= 100; ++s) {
+            symbols.push_back(s);
+        }
+    }
 
     std::mt19937 rng(42);
     std::shuffle(symbols.begin(), symbols.end(), rng);
@@ -208,14 +220,26 @@ StageResult run_stage(
         warmup_fn(engine, queries);
     }
 
+    std::vector<double> latencies;
+    latencies.reserve(queries.size());
     auto t0 = std::chrono::high_resolution_clock::now();
     {
         ScopedCoutSilencer silence(true);
         for (const auto& q : queries) {
+            auto qt0 = std::chrono::high_resolution_clock::now();
             global_dummy_accumulator += query_fn(engine, q);
+            auto qt1 = std::chrono::high_resolution_clock::now();
+            latencies.push_back(std::chrono::duration<double, std::micro>(qt1 - qt0).count());
         }
     }
     auto t1 = std::chrono::high_resolution_clock::now();
+    
+    std::sort(latencies.begin(), latencies.end());
+    double p95 = 0.0, p99 = 0.0;
+    if (!latencies.empty()) {
+        p95 = latencies[std::min(latencies.size() - 1, static_cast<std::size_t>(latencies.size() * 0.95))];
+        p99 = latencies[std::min(latencies.size() - 1, static_cast<std::size_t>(latencies.size() * 0.99))];
+    }
 
     const double total_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
     const double avg_latency_us = (total_ms * 1000.0) / static_cast<double>(queries.size());
@@ -229,16 +253,18 @@ StageResult run_stage(
         total_ms,
         avg_latency_us,
         throughput_qps,
-        0.0
+        0.0,
+        p95,
+        p99
     };
 }
 
 void print_table(const std::vector<StageResult>& results) {
     std::cout << std::fixed << std::setprecision(3);
-    std::cout << "+----+-----------------------------------------------+------------+---------------+------------------+---------------------+----------------------+\n";
-    std::cout << "| #  | Stage Name                                    | Queries    | Avg Latency   | Total Time       | Throughput          | Speedup vs Baseline  |\n";
-    std::cout << "|    |                                               |            | (us/query)    | (ms)             | (QPS)               | (x)                  |\n";
-    std::cout << "+----+-----------------------------------------------+------------+---------------+------------------+---------------------+----------------------+\n";
+    std::cout << "+----+-----------------------------------------------+------------+---------------+---------------+---------------+------------------+---------------------+----------------------+\n";
+    std::cout << "| #  | Stage Name                                    | Queries    | Avg Latency   | p95 Latency   | p99 Latency   | Total Time       | Throughput          | Speedup vs Baseline  |\n";
+    std::cout << "|    |                                               |            | (us/query)    | (us/query)    | (us/query)    | (ms)             | (QPS)               | (x)                  |\n";
+    std::cout << "+----+-----------------------------------------------+------------+---------------+---------------+---------------+------------------+---------------------+----------------------+\n";
 
     for (std::size_t i = 0; i < results.size(); ++i) {
         const auto& r = results[i];
@@ -247,13 +273,15 @@ void print_table(const std::vector<StageResult>& results) {
                   << " | " << std::left << std::setw(45) << r.name << std::right
                   << " | " << std::setw(10) << r.query_count
                   << " | " << std::setw(13) << r.avg_latency_us
+                  << " | " << std::setw(13) << r.p95_latency_us
+                  << " | " << std::setw(13) << r.p99_latency_us
                   << " | " << std::setw(16) << r.total_time_ms
                   << " | " << std::setw(19) << r.throughput_qps
                   << " | " << std::setw(20) << r.speedup_vs_baseline
                   << " |\n";
     }
 
-    std::cout << "+----+-----------------------------------------------+------------+---------------+------------------+---------------------+----------------------+\n";
+    std::cout << "+----+-----------------------------------------------+------------+---------------+---------------+---------------+------------------+---------------------+----------------------+\n";
 }
 
 void run_suite(const std::string& suite_name, const std::vector<QueryTuple>& workload) {
@@ -331,6 +359,56 @@ void run_suite(const std::string& suite_name, const std::vector<QueryTuple>& wor
               << std::setprecision(9) << dummy_accumulator << "\n";
 }
 
+void run_smart_profile() {
+    std::cout << "\n============================================================\n";
+    std::cout << "  Smart Profile (10M queries, perf hot-path)\n";
+    std::cout << "============================================================\n";
+
+    const auto workload = make_best_case_workload();
+    tick_store::Engine engine("ticks.bin");
+    const auto symbols = unique_symbols_in_order(workload);
+
+    double accumulator = 0.0;
+    double total_ms = 0.0;
+    constexpr int repetitions = 50000;
+
+    {
+        ScopedCoutSilencer silence(true);
+
+        for (std::int32_t sym : symbols) {
+            (void)engine.smart_simd_query(sym, kMinTimestamp, kMaxTimestamp);
+        }
+
+        for (int warmup = 0; warmup < 10; ++warmup) {
+            for (const auto& q : workload) {
+                accumulator += engine.smart_simd_query(q.symbol, q.start_time, q.end_time);
+            }
+        }
+
+        auto t0 = std::chrono::high_resolution_clock::now();
+
+        for (int r = 0; r < repetitions; ++r) {
+            for (const auto& q : workload) {
+                accumulator += engine.smart_simd_query(q.symbol, q.start_time, q.end_time);
+            }
+        }
+
+        auto t1 = std::chrono::high_resolution_clock::now();
+        total_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    }
+
+    std::size_t total_queries = workload.size() * repetitions;
+    double avg_latency_us = (total_ms * 1000.0) / static_cast<double>(total_queries);
+    double qps = (total_ms > 0.0) ? static_cast<double>(total_queries) / (total_ms / 1000.0) : 0.0;
+
+    std::cout << "[Smart Profile]\n";
+    std::cout << "Queries: " << total_queries << "\n";
+    std::cout << "Accumulator: " << std::setprecision(9) << accumulator << "\n";
+    std::cout << "Total time: " << std::fixed << std::setprecision(3) << total_ms << " ms\n";
+    std::cout << "Average latency: " << avg_latency_us << " us\n";
+    std::cout << "QPS: " << qps << "\n";
+}
+
 }
 
 int main(int argc, char** argv) {
@@ -374,6 +452,10 @@ int main(int argc, char** argv) {
                 run_suite("Best-Case Cached Workload (Repeated Hot Symbols)", best_case_workload);
                 run_suite("Worst-Case First-Touch Workload (Unique Symbols)", worst_case_workload);
                 run_suite("Real-Life Skewed Workload (80/20 Distribution)", real_life_workload);
+                break;
+                
+            case Mode::Smart:
+                run_smart_profile();
                 break;
         }
 

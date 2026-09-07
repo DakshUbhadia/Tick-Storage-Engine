@@ -2,3 +2,6 @@ ticks.bin
 generate_data
 tick_engine
 benchmark_engine
+perf.data
+perf.data.old
+correctness_checker

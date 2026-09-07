@@ -57,7 +57,7 @@ private:
     float*        prices;
     std::int32_t* sizes;
 
-    void swap_rows(std::size_t i, std::size_t j);
+    [[gnu::always_inline]] inline void swap_rows(std::size_t i, std::size_t j);
 
     void sort_partition_by_time(std::size_t left, std::size_t right);
 

@@ -80,6 +80,8 @@ Engine::Engine(const std::string& filepath)
         );
     }
 
+    // ::madvise(mapped_memory, file_size, MADV_RANDOM);
+
 
     char* base = static_cast<char*>(mapped_memory);
 
@@ -128,12 +130,11 @@ double Engine::query_average_price(std::int32_t target_symbol,
 
     for (std::size_t i = 0; i < num_ticks; ++i) {
 
-        if (symbol_ids[i] == target_symbol
-            && timestamps[i] >= start_time
-            && timestamps[i] <= end_time)
-        {
+        if (symbol_ids[i] == target_symbol &&
+            timestamps[i] >= start_time &&
+            timestamps[i] <= end_time) {
             sum += static_cast<double>(prices[i]);
-            ++match_count;
+            match_count++;
         }
     }
 
@@ -154,7 +155,7 @@ double Engine::query_average_price(std::int32_t target_symbol,
 }
 
 
-void Engine::swap_rows(std::size_t i, std::size_t j) {
+[[gnu::always_inline]] inline void Engine::swap_rows(std::size_t i, std::size_t j) {
     std::swap(timestamps[i], timestamps[j]);
     std::swap(symbol_ids[i], symbol_ids[j]);
     std::swap(prices[i],     prices[j]);
@@ -261,9 +262,10 @@ double Engine::simd_cracked_query(std::size_t  part_start,
     __m256i v_end   = _mm256_set1_epi64x(end_time);
     __m256  v_sum   = _mm256_setzero_ps();
     std::size_t match_count = 0;
-
     std::size_t i        = part_start;
     std::size_t simd_end = (part_size >= 8) ? (part_end - 7) : part_start;
+
+    __m256i all_ones = _mm256_set1_epi64x(-1);
 
     for (; i < simd_end; i += 8) {
 
@@ -278,7 +280,6 @@ double Engine::simd_cracked_query(std::size_t  part_start,
         __m256i too_late_lo     = _mm256_cmpgt_epi64(ts_lo, v_end);
         __m256i out_of_range_lo = _mm256_or_si256(too_early_lo, too_late_lo);
 
-        __m256i all_ones = _mm256_set1_epi64x(-1);
         __m256i mask_lo  = _mm256_andnot_si256(out_of_range_lo, all_ones);
 
         __m256i too_early_hi    = _mm256_cmpgt_epi64(v_start, ts_hi);
@@ -384,11 +385,9 @@ std::pair<std::size_t, std::size_t> Engine::binary_search_time(
 
     while (lo < hi) {
         std::size_t mid = lo + (hi - lo) / 2;
-        if (timestamps[mid] < start_time) {
-            lo = mid + 1;
-        } else {
-            hi = mid;
-        }
+        bool less = timestamps[mid] < start_time;
+        lo = less ? mid + 1 : lo;
+        hi = less ? hi : mid;
     }
     std::size_t lower_bound_idx = lo;
 
@@ -397,11 +396,9 @@ std::pair<std::size_t, std::size_t> Engine::binary_search_time(
 
     while (lo < hi) {
         std::size_t mid = lo + (hi - lo) / 2;
-        if (timestamps[mid] <= end_time) {
-            lo = mid + 1;
-        } else {
-            hi = mid;
-        }
+        bool less_eq = timestamps[mid] <= end_time;
+        lo = less_eq ? mid + 1 : lo;
+        hi = less_eq ? hi : mid;
     }
     std::size_t upper_bound_idx = lo;
 

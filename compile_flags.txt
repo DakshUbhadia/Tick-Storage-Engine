@@ -1,0 +1,8 @@
+-I\\wsl.localhost\Ubuntu\usr\include\c++\13
+-I\\wsl.localhost\Ubuntu\usr\include\x86_64-linux-gnu\c++\13
+-I\\wsl.localhost\Ubuntu\usr\include\c++\13\backward
+-I\\wsl.localhost\Ubuntu\usr\local\include
+-I\\wsl.localhost\Ubuntu\usr\include\x86_64-linux-gnu
+-I\\wsl.localhost\Ubuntu\usr\include
+-mavx2
+-std=c++17
