@@ -6,72 +6,53 @@ The project stores 50 million synthetic ticks in a columnar binary file, maps th
 
 ## Headline Result
 
-The benchmark demonstrates a massive cold-to-hot latency shift. In our **Best-Case** workload (repeated hot symbols), we see the following results:
+In the captured 50-million-tick run, Smart SIMD averaged `0.746 us/query` on the best-case cached workload, `1.258 us/query` on the real-life skewed workload, and `1.278 us/query` on the worst-case first-touch workload. The corresponding speedups over each workload's full-scan baseline were `60,981.662x`, `32,655.970x`, and `30,649.308x`.
 
-- Baseline full scan: `41,629.946 us/query`
-- Ultimate warmed smart path: `1.055 us/query`
-- Speedup vs measured baseline: `39,475.081x`
-- Peak Throughput: `~948,237 QPS`
-- Dataset: `50,000,000` ticks, `1,000,000,000` bytes
+The large cold-to-hot difference reflects separate query regimes. A first-touch query can pay partitioning and sorting costs, while a warmed query reuses the prepared symbol range and narrows the time window before aggregation.
 
-Even in a **Real-Life Skewed** workload (80% hot queries, 20% cold queries), the warmed path achieves an incredible **27,145x speedup** (1.582 us/query vs 42,948 us/query).
+## Benchmark Results
 
-Furthermore, in a **Worst-Case** scenario (randomly jumping across 100 different partitions to defeat cache locality), the engine's binary-search and SIMD pipeline still manages a staggering **14,512x speedup** (2.741 us/query) and a peak throughput of **~365,000 QPS**.
+The benchmark suites each issued 1,000 queries against a 50,000,000-tick dataset (`1,000,000,000` bytes). Latency and throughput are measured by the benchmark, and speedup is relative to that workload's full-scan baseline. Latency and percentile values are in microseconds per query; throughput is queries per second. The tables are ordered from best-case to real-life to worst-case. Small timing differences can vary between runs.
 
-That number is best understood as a regime change, not as one identical query becoming thousands of times faster. The first query for a symbol pays an adaptive partitioning and sorting cost. Repeated queries reuse the prepared structure, binary search the time boundary, and SIMD scan only tiny timestamp windows.
+### Best-case cached workload (repeated hot symbols)
 
-## Benchmark
+| Query path | Avg latency | p95 | p99 | Throughput | Speedup |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Baseline full scan | 45,491.283 | 65,575.862 | 73,359.143 | 21.982 | 1.000× |
+| Adaptive cracking (cold miss) | 1,315.433 | 564.723 | 892.847 | 760.206 | 34.583× |
+| Adaptive cracking (hot hit) | 324.797 | 453.414 | 906.828 | 3,078.846 | 140.061× |
+| Smart SIMD hot path | 0.746 | 0.911 | 1.056 | 1,340,513.122 | 60,981.662× |
 
-The benchmark runs three distinct workload scenarios—**Best-Case Cached**, **Worst-Case Randomized Scatter**, and **Real-Life Skewed**—each processing 1000 queries against the 50-million-tick dataset.
+### Real-life skewed workload (80/20 distribution)
 
-### 1. Best-Case Cached Workload (Repeated Hot Symbols)
-This tests the engine at its peak steady-state performance. Queries repeatedly hit the exact same 3 hot symbols with tight time windows, resulting in maximum temporal locality and cache utilization.
-```text
-+----+-----------------------------------------------+------------+---------------+------------------+---------------------+----------------------+
-| #  | Stage Name                                    | Queries    | Avg Latency   | Total Time       | Throughput          | Speedup vs Baseline  |
-|    |                                               |            | (us/query)    | (ms)             | (QPS)               | (x)                  |
-+----+-----------------------------------------------+------------+---------------+------------------+---------------------+----------------------+
-|  1 | Baseline O(N) Full Scan                       |       1000 |     41629.946 |        41629.946 |              24.021 |                1.000 |
-|  2 | Adaptive Cracking (Cold Miss)                 |       1000 |      1377.873 |         1377.873 |             725.756 |               30.213 |
-|  3 | Adaptive Cracking (Hot Hit)                   |       1000 |       291.774 |          291.774 |            3427.307 |              142.679 |
-|  4 | Ultimate Hot Path (Smart SIMD)                |       1000 |         1.055 |            1.055 |          948237.606 |            39475.081 |
-+----+-----------------------------------------------+------------+---------------+------------------+---------------------+----------------------+
-```
+| Query path | Avg latency | p95 | p99 | Throughput | Speedup |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Baseline full scan | 41,079.251 | 50,067.446 | 56,859.349 | 24.343 | 1.000× |
+| Adaptive cracking (cold miss) | 4,785.868 | 38,929.536 | 56,660.988 | 208.949 | 8.583× |
+| Adaptive cracking (hot hit) | 374.019 | 545.943 | 824.348 | 2,673.661 | 109.832× |
+| Smart SIMD hot path | 1.258 | 2.469 | 2.958 | 794,950.475 | 32,655.970× |
 
-### 2. Worst-Case Workload (Randomized Scatter)
-This scenario randomly jumps across all 100 available symbols with wide time windows. It forces the engine to pay the initial cracking cost for every symbol in the dataset, and then heavily defeats CPU caching by ensuring no two consecutive queries hit the same memory region.
-```text
-+----+-----------------------------------------------+------------+---------------+------------------+---------------------+----------------------+
-| #  | Stage Name                                    | Queries    | Avg Latency   | Total Time       | Throughput          | Speedup vs Baseline  |
-|    |                                               |            | (us/query)    | (ms)             | (QPS)               | (x)                  |
-+----+-----------------------------------------------+------------+---------------+------------------+---------------------+----------------------+
-|  1 | Baseline O(N) Full Scan                       |       1000 |     39773.257 |        39773.257 |              25.143 |                1.000 |
-|  2 | Adaptive Cracking (Cold Miss)                 |       1000 |      7590.720 |         7590.720 |             131.740 |                5.240 |
-|  3 | Adaptive Cracking (Hot Hit)                   |       1000 |       311.279 |          311.279 |            3212.548 |              127.773 |
-|  4 | Ultimate Hot Path (Smart SIMD)                |       1000 |         2.741 |            2.741 |          364881.072 |            14512.509 |
-+----+-----------------------------------------------+------------+---------------+------------------+---------------------+----------------------+
-```
+### Worst-case first-touch workload (unique symbols)
 
-### 3. Real-Life Skewed Workload (80/20 Distribution)
-This scenario simulates an actual trading workload where 80% of queries hit a few hot symbols, and 20% hit cold symbols.
-```text
-+----+-----------------------------------------------+------------+---------------+------------------+---------------------+----------------------+
-| #  | Stage Name                                    | Queries    | Avg Latency   | Total Time       | Throughput          | Speedup vs Baseline  |
-|    |                                               |            | (us/query)    | (ms)             | (QPS)               | (x)                  |
-+----+-----------------------------------------------+------------+---------------+------------------+---------------------+----------------------+
-|  1 | Baseline O(N) Full Scan                       |       1000 |     42948.176 |        42948.176 |              23.284 |                1.000 |
-|  2 | Adaptive Cracking (Cold Miss)                 |       1000 |      4587.372 |         4587.372 |             217.990 |                9.362 |
-|  3 | Adaptive Cracking (Hot Hit)                   |       1000 |       306.282 |          306.282 |            3264.967 |              140.224 |
-|  4 | Ultimate Hot Path (Smart SIMD)                |       1000 |         1.582 |            1.582 |          632058.913 |            27145.778 |
-+----+-----------------------------------------------+------------+---------------+------------------+---------------------+----------------------+
-```
+| Query path | Avg latency | p95 | p99 | Throughput | Speedup |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Baseline full scan | 39,184.864 | 45,997.635 | 56,236.555 | 25.520 | 1.000× |
+| Adaptive cracking (cold miss) | 5,036.124 | 40,754.870 | 67,339.792 | 198.565 | 7.781× |
+| Adaptive cracking (hot hit) | 326.161 | 389.007 | 447.326 | 3,065.971 | 120.140× |
+| Smart SIMD hot path | 1.278 | 2.166 | 2.583 | 782,172.108 | 30,649.308× |
 
-Benchmark interpretation:
+Smart SIMD follows the expected workload trend in this run: cached hot queries are fastest, the skewed mix is slightly slower, and first-touch unique-symbol queries are slowest. The cold-miss path has a wide latency spread because a small number of queries can incur substantial partitioning work. The hot-hit and Smart SIMD rows include warmed symbol partitions.
 
-- **Stage 1** is the direct `O(N)` scan over all 50 million ticks.
-- **Stage 2** exposes the cost profile of adaptive cracking. First-touch structural work can be expensive but always beats the baseline since the uncracked tail shrinks with every miss.
-- **Stage 3** demonstrates the engine reusing partitioned symbol ranges (the cache hit). 
-- **Stage 4** represents the ultimate warmed state: narrowed windows via binary-search over sorted ranges, and AVX2 SIMD aggregation. It effortlessly reaches between **360,000 and 940,000 queries per second** depending on memory locality and cache conditions.
+### Longer Smart SIMD profile
+
+A separate profile repeatedly queried the three hot symbols, pinned to CPU 2 with `taskset -c 2`:
+
+| Queries | Total time (ms) | Avg latency (µs/query) | Throughput (QPS) |
+| ---: | ---: | ---: | ---: |
+| 10,000,000 | 10,593.959 | 1.059 | 943,934.204 |
+| 50,000,000 | 50,786.431 | 1.016 | 984,514.933 |
+
+Benchmark timings depend on the CPU, compiler options, page-cache state, and system load. Treat these measurements as a record of the captured run, not as a performance guarantee.
 
 ## What The Engine Optimizes
 
